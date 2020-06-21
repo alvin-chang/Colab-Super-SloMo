@@ -4,6 +4,7 @@ import os
 import os.path
 import ctypes
 from shutil import rmtree, move
+import shutil
 from PIL import Image
 import torch
 import torchvision.transforms as transforms
@@ -21,7 +22,6 @@ parser.add_argument("--fps", type=float, default=30, help='specify fps of output
 parser.add_argument("--sf", type=int, required=True, help='specify the slomo factor N. This will increase the frames by Nx. Example sf=2 ==> 2x frames')
 parser.add_argument("--batch_size", type=int, default=1, help='Specify batch size for faster conversion. This will depend on your cpu/gpu memory. Default: 1')
 parser.add_argument("--output", type=str, default="output.mkv", help='Specify output file name. Default: output.mp4')
-parser.add_argument("--sound", type=bool, default=True, help='Specify sound output.')
 args = parser.parse_args()
 
 def check():
@@ -75,24 +75,20 @@ def extract_frames(video, outDir):
         error = "Error converting file:{}. Exiting.".format(video)
     return error
 
-def create_video_without_sound(dir):
-    error = ""
-    print('{} -r {} -i {}/%d.png -vcodec ffvhuff {}'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), args.fps, dir, args.output))
-    retn = os.system('{} -r {} -i {}/%d.png -crf 16 "{}"'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), args.fps, dir, args.output))
-    if retn:
-        error = "Error creating output video. Exiting."
-    return error
-
-def create_video(dir):
-    error = ""
-    print('{} -r {} -i {}/%d.png -vcodec ffvhuff {}'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), args.fps, dir, args.output))
-    retn = os.system('{} -r {} -i /content/output-audio.aac -i {}/%d.png -crf 16 "{}"'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), args.fps, dir, args.output))
-    if retn:
-        error = "Error creating output video. Exiting."
-    return error
-
-
 def main():
+
+    # Deleting old files, if they exist
+    file_extention = os.path.splitext(args.video)[1]
+    if os.path.exists("/content/input{file_extention}"):
+        os.remove("/content/input{file_extention}")
+    if os.path.exists("/content/output-audio.aac"):
+      os.remove("/content/output-audio.aac")
+
+    if os.path.exists("/content/Colab-Super-SloMo/extract"):
+      shutil.rmtree("/content/Colab-Super-SloMo/extract")
+    if os.path.exists("/content/Colab-Super-SloMo/tmp"):
+      shutil.rmtree("/content/Colab-Super-SloMo/tmp")
+
     # Check if arguments are okay
     error = check()
     if error:
@@ -113,8 +109,8 @@ def main():
         # ctypes.windll only exists on Windows
         ctypes.windll.kernel32.SetFileAttributesW(extractionDir, FILE_ATTRIBUTE_HIDDEN)
 
-    extractionPath = os.path.join(extractionDir, "input")
-    outputPath     = os.path.join(extractionDir, "output")
+    extractionPath = '/content/Colab-Super-SloMo/extract'
+    outputPath     = '/content/Colab-Super-SloMo/tmp'
     os.mkdir(extractionPath)
     os.mkdir(outputPath)
     error = extract_frames(args.video, extractionPath)
@@ -178,7 +174,7 @@ def main():
 
             # Save reference frames in output folder
             for batchIndex in range(args.batch_size):
-                (TP(frame0[batchIndex].detach())).resize(videoFrames.origDim, Image.BILINEAR).save(os.path.join(outputPath, str(frameCounter + args.sf * batchIndex) + ".png"))
+                (TP(frame0[batchIndex].detach())).resize(videoFrames.origDim, Image.BILINEAR).save(os.path.join(outputPath, str(frameCounter + args.sf * batchIndex).zfill(8) + ".png"))
             frameCounter += 1
 
             # Generate intermediate frames
@@ -209,20 +205,11 @@ def main():
 
                 # Save intermediate frame
                 for batchIndex in range(args.batch_size):
-                    (TP(Ft_p[batchIndex].cpu().detach())).resize(videoFrames.origDim, Image.BILINEAR).save(os.path.join(outputPath, str(frameCounter + args.sf * batchIndex) + ".png"))
+                    (TP(Ft_p[batchIndex].cpu().detach())).resize(videoFrames.origDim, Image.BILINEAR).save(os.path.join(outputPath, str(frameCounter + args.sf * batchIndex).zfill(8) + ".png"))
                 frameCounter += 1
 
             # Set counter accounting for batching of frames
             frameCounter += args.sf * (args.batch_size - 1)
-
-    # Generate video from interpolated frames
-    if args.sound == False:
-      create_video_without_sound(outputPath)
-    if args.sound == True:
-      create_video(outputPath)
-
-    # Remove temporary files
-    rmtree(extractionDir)
 
     exit(0)
 
