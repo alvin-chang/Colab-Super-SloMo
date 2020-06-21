@@ -21,6 +21,7 @@ parser.add_argument("--fps", type=float, default=30, help='specify fps of output
 parser.add_argument("--sf", type=int, required=True, help='specify the slomo factor N. This will increase the frames by Nx. Example sf=2 ==> 2x frames')
 parser.add_argument("--batch_size", type=int, default=1, help='Specify batch size for faster conversion. This will depend on your cpu/gpu memory. Default: 1')
 parser.add_argument("--output", type=str, default="output.mkv", help='Specify output file name. Default: output.mp4')
+parser.add_argument("--sound", type=bool, default=True, help='Specify sound output.')
 args = parser.parse_args()
 
 def check():
@@ -45,8 +46,8 @@ def check():
         error = "Error: --batch_size has to be atleast 1"
     if (args.fps < 1):
         error = "Error: --fps has to be atleast 1"
-    if ".mkv" not in args.output:
-        error = "output needs to have mkv container"
+    #if ".mkv" not in args.output:
+    #    error = "output needs to have mkv container"
     return error
 
 def extract_frames(video, outDir):
@@ -74,10 +75,18 @@ def extract_frames(video, outDir):
         error = "Error converting file:{}. Exiting.".format(video)
     return error
 
-def create_video(dir):
+def create_video_without_sound(dir):
     error = ""
     print('{} -r {} -i {}/%d.png -vcodec ffvhuff {}'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), args.fps, dir, args.output))
     retn = os.system('{} -r {} -i {}/%d.png -crf 16 "{}"'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), args.fps, dir, args.output))
+    if retn:
+        error = "Error creating output video. Exiting."
+    return error
+
+def create_video(dir):
+    error = ""
+    print('{} -r {} -i {}/%d.png -vcodec ffvhuff {}'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), args.fps, dir, args.output))
+    retn = os.system('{} -r {} -i /content/output-audio.aac -i {}/%d.png -crf 16 "{}"'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), args.fps, dir, args.output))
     if retn:
         error = "Error creating output video. Exiting."
     return error
@@ -207,7 +216,10 @@ def main():
             frameCounter += args.sf * (args.batch_size - 1)
 
     # Generate video from interpolated frames
-    create_video(outputPath)
+    if args.sound == False:
+      create_video_without_sound(outputPath)
+    if args.sound == True:
+      create_video(outputPath)
 
     # Remove temporary files
     rmtree(extractionDir)
