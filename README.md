@@ -8,7 +8,7 @@ __Check out [our paper](https://github.com/avinashpaliwal/Deep-SloMo) "Deep Slow
 
 ## Important information
 
-- If you can't open `Colab-USRNet.ipynb` inside your Google Drive, try this [colab link](https://colab.research.google.com/drive/12aoEcer6NEAxD8yvALcKcshXEPrNH_hd?usp=sharing) and save it to your Google Drive. The "open in Colab"-button can be missing in Google Drive, if that person never used Colab.
+- If you can't open `Colab-Super-SloMo.ipynb` inside your Google Drive, try this [colab link](https://colab.research.google.com/drive/12aoEcer6NEAxD8yvALcKcshXEPrNH_hd?usp=sharing) and save it to your Google Drive. The "open in Colab"-button can be missing in Google Drive, if that person never used Colab.
 - Google Colab does assign a random GPU. It depends on luck.
 - The Google Colab VM does have a maximum session length of 12 hours. Additionally there is a 30 minute timeout if you leave colab. The VM will be deleted after these timeouts.
 
