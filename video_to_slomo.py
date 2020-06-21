@@ -1,216 +1,510 @@
-#!/usr/bin/env python3
-import argparse
-import os
-import os.path
-import ctypes
-from shutil import rmtree, move
-import shutil
-from PIL import Image
-import torch
-import torchvision.transforms as transforms
-import model
-import dataloader
-import platform
-from tqdm import tqdm
-
-# For parsing commandline arguments
-parser = argparse.ArgumentParser()
-parser.add_argument("--ffmpeg_dir", type=str, default="", help='path to ffmpeg.exe')
-parser.add_argument("--video", type=str, required=True, help='path of video to be converted')
-parser.add_argument("--checkpoint", type=str, required=True, help='path of checkpoint for pretrained model')
-parser.add_argument("--fps", type=float, default=30, help='specify fps of output video. Default: 30.')
-parser.add_argument("--sf", type=int, required=True, help='specify the slomo factor N. This will increase the frames by Nx. Example sf=2 ==> 2x frames')
-parser.add_argument("--batch_size", type=int, default=1, help='Specify batch size for faster conversion. This will depend on your cpu/gpu memory. Default: 1')
-parser.add_argument("--output", type=str, default="output.mkv", help='Specify output file name. Default: output.mp4')
-args = parser.parse_args()
-
-def check():
-    """
-    Checks the validity of commandline arguments.
-
-    Parameters
-    ----------
-        None
-
-    Returns
-    -------
-        error : string
-            Error message if error occurs otherwise blank string.
-    """
-
-
-    error = ""
-    if (args.sf < 2):
-        error = "Error: --sf/slomo factor has to be atleast 2"
-    if (args.batch_size < 1):
-        error = "Error: --batch_size has to be atleast 1"
-    if (args.fps < 1):
-        error = "Error: --fps has to be atleast 1"
-    #if ".mkv" not in args.output:
-    #    error = "output needs to have mkv container"
-    return error
-
-def extract_frames(video, outDir):
-    """
-    Converts the `video` to images.
-
-    Parameters
-    ----------
-        video : string
-            full path to the video file.
-        outDir : string
-            path to directory to output the extracted images.
-
-    Returns
-    -------
-        error : string
-            Error message if error occurs otherwise blank string.
-    """
-
-
-    error = ""
-    print('{} -i {} -vsync 0 {}/%06d.png'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), video, outDir))
-    retn = os.system('{} -i "{}" -vsync 0 {}/%06d.png'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), video, outDir))
-    if retn:
-        error = "Error converting file:{}. Exiting.".format(video)
-    return error
-
-def main():
-
-    # Deleting old files, if they exist
-    file_extention = os.path.splitext(args.video)[1]
-    if os.path.exists("/content/input{file_extention}"):
-        os.remove("/content/input{file_extention}")
-    if os.path.exists("/content/output-audio.aac"):
-      os.remove("/content/output-audio.aac")
-
-    if os.path.exists("/content/Colab-Super-SloMo/extract"):
-      shutil.rmtree("/content/Colab-Super-SloMo/extract")
-    if os.path.exists("/content/Colab-Super-SloMo/tmp"):
-      shutil.rmtree("/content/Colab-Super-SloMo/tmp")
-
-    # Check if arguments are okay
-    error = check()
-    if error:
-        print(error)
-        exit(1)
-
-    # Create extraction folder and extract frames
-    IS_WINDOWS = 'Windows' == platform.system()
-    extractionDir = "tmpSuperSloMo"
-    if not IS_WINDOWS:
-        # Assuming UNIX-like system where "." indicates hidden directories
-        extractionDir = "." + extractionDir
-    if os.path.isdir(extractionDir):
-        rmtree(extractionDir)
-    os.mkdir(extractionDir)
-    if IS_WINDOWS:
-        FILE_ATTRIBUTE_HIDDEN = 0x02
-        # ctypes.windll only exists on Windows
-        ctypes.windll.kernel32.SetFileAttributesW(extractionDir, FILE_ATTRIBUTE_HIDDEN)
-
-    extractionPath = '/content/Colab-Super-SloMo/extract'
-    outputPath     = '/content/Colab-Super-SloMo/tmp'
-    os.mkdir(extractionPath)
-    os.mkdir(outputPath)
-    error = extract_frames(args.video, extractionPath)
-    if error:
-        print(error)
-        exit(1)
-
-    # Initialize transforms
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    mean = [0.429, 0.431, 0.397]
-    std  = [1, 1, 1]
-    normalize = transforms.Normalize(mean=mean,
-                                     std=std)
-
-    negmean = [x * -1 for x in mean]
-    revNormalize = transforms.Normalize(mean=negmean, std=std)
-
-    # Temporary fix for issue #7 https://github.com/avinashpaliwal/Super-SloMo/issues/7 -
-    # - Removed per channel mean subtraction for CPU.
-    if (device == "cpu"):
-        transform = transforms.Compose([transforms.ToTensor()])
-        TP = transforms.Compose([transforms.ToPILImage()])
-    else:
-        transform = transforms.Compose([transforms.ToTensor(), normalize])
-        TP = transforms.Compose([revNormalize, transforms.ToPILImage()])
-
-    # Load data
-    videoFrames = dataloader.Video(root=extractionPath, transform=transform)
-    videoFramesloader = torch.utils.data.DataLoader(videoFrames, batch_size=args.batch_size, shuffle=False)
-
-    # Initialize model
-    flowComp = model.UNet(6, 4)
-    flowComp.to(device)
-    for param in flowComp.parameters():
-        param.requires_grad = False
-    ArbTimeFlowIntrp = model.UNet(20, 5)
-    ArbTimeFlowIntrp.to(device)
-    for param in ArbTimeFlowIntrp.parameters():
-        param.requires_grad = False
-
-    flowBackWarp = model.backWarp(videoFrames.dim[0], videoFrames.dim[1], device)
-    flowBackWarp = flowBackWarp.to(device)
-
-    dict1 = torch.load(args.checkpoint, map_location='cpu')
-    ArbTimeFlowIntrp.load_state_dict(dict1['state_dictAT'])
-    flowComp.load_state_dict(dict1['state_dictFC'])
-
-    # Interpolate frames
-    frameCounter = 1
-
-    with torch.no_grad():
-        for _, (frame0, frame1) in enumerate(tqdm(videoFramesloader), 0):
-
-            I0 = frame0.to(device)
-            I1 = frame1.to(device)
-
-            flowOut = flowComp(torch.cat((I0, I1), dim=1))
-            F_0_1 = flowOut[:,:2,:,:]
-            F_1_0 = flowOut[:,2:,:,:]
-
-            # Save reference frames in output folder
-            for batchIndex in range(args.batch_size):
-                (TP(frame0[batchIndex].detach())).resize(videoFrames.origDim, Image.BILINEAR).save(os.path.join(outputPath, str(frameCounter + args.sf * batchIndex).zfill(8) + ".png"))
-            frameCounter += 1
-
-            # Generate intermediate frames
-            for intermediateIndex in range(1, args.sf):
-                t = float(intermediateIndex) / args.sf
-                temp = -t * (1 - t)
-                fCoeff = [temp, t * t, (1 - t) * (1 - t), temp]
-
-                F_t_0 = fCoeff[0] * F_0_1 + fCoeff[1] * F_1_0
-                F_t_1 = fCoeff[2] * F_0_1 + fCoeff[3] * F_1_0
-
-                g_I0_F_t_0 = flowBackWarp(I0, F_t_0)
-                g_I1_F_t_1 = flowBackWarp(I1, F_t_1)
-
-                intrpOut = ArbTimeFlowIntrp(torch.cat((I0, I1, F_0_1, F_1_0, F_t_1, F_t_0, g_I1_F_t_1, g_I0_F_t_0), dim=1))
-
-                F_t_0_f = intrpOut[:, :2, :, :] + F_t_0
-                F_t_1_f = intrpOut[:, 2:4, :, :] + F_t_1
-                V_t_0   = torch.sigmoid(intrpOut[:, 4:5, :, :])
-                V_t_1   = 1 - V_t_0
-
-                g_I0_F_t_0_f = flowBackWarp(I0, F_t_0_f)
-                g_I1_F_t_1_f = flowBackWarp(I1, F_t_1_f)
-
-                wCoeff = [1 - t, t]
-
-                Ft_p = (wCoeff[0] * V_t_0 * g_I0_F_t_0_f + wCoeff[1] * V_t_1 * g_I1_F_t_1_f) / (wCoeff[0] * V_t_0 + wCoeff[1] * V_t_1)
-
-                # Save intermediate frame
-                for batchIndex in range(args.batch_size):
-                    (TP(Ft_p[batchIndex].cpu().detach())).resize(videoFrames.origDim, Image.BILINEAR).save(os.path.join(outputPath, str(frameCounter + args.sf * batchIndex).zfill(8) + ".png"))
-                frameCounter += 1
-
-            # Set counter accounting for batching of frames
-            frameCounter += args.sf * (args.batch_size - 1)
-
-    exit(0)
-
-main()
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "name": "Colab-Super-SloMo.ipynb",
+      "provenance": [],
+      "private_outputs": true,
+      "collapsed_sections": [],
+      "toc_visible": true
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "accelerator": "GPU"
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "3KUlO4oiA8CM",
+        "colab_type": "text"
+      },
+      "source": [
+        "# Slow Motion with Super SloMo\n",
+        "\n",
+        "This notebook uses [Super SloMo](https://arxiv.org/abs/1712.00080) from the open source project [avinashpaliwal/Super-SloMo](https://github.com/avinashpaliwal/Super-SloMo) to slow down a given video.\n",
+        "\n",
+        "This is a modification of [this Colab Notebook](https://colab.research.google.com/github/tugstugi/dl-colab-notebooks/blob/master/notebooks/SuperSloMo.ipynb#scrollTo=P7eRRjlYaV1s) by styler00dollar aka \"sudo rm -rf / --no-preserve-root#8353\" on discord.\n",
+        "\n",
+        "This version:\n",
+        "- allows to use Google Drive for own videos\n",
+        "- uses CRF inside the ffmpeg command for better space usage\n",
+        "- custom ffmpeg command possible\n",
+        "- includes experemental audio support\n",
+        "- removes .mkv input restriction and supports different filetypes\n",
+        "\n",
+        "May be implemented:\n",
+        "- different output format\n",
+        "\n",
+        "Interesting things:\n",
+        "- Can do 1080p without crashing (Dain can only do ~900p with 16GB VRAM)\n",
+        "- Currently only recommending input that is like several minutes long\n",
+        "\n",
+        "Simple Tutorial:\n",
+        "- Run cells with these play-buttons that are visible on the left side of the code/text. ```[ ]``` indicate a play-button."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "f6HvhIe5Xt0z",
+        "colab_type": "text"
+      },
+      "source": [
+        "# Check GPU"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "2bMEfw4S8pBw",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "!nvidia-smi"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "obWYYIsHX2yJ",
+        "colab_type": "text"
+      },
+      "source": [
+        "## Install avinashpaliwal/Super-SloMo"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "4OAYywPHApuz",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "import os\n",
+        "from os.path import exists, join, basename, splitext, dirname\n",
+        "\n",
+        "git_repo_url = 'https://github.com/styler00dollar/Colab-Super-SloMo'\n",
+        "project_name = splitext(basename(git_repo_url))[0]\n",
+        "if not exists(project_name):\n",
+        "  # clone and install dependencies\n",
+        "  !git clone -q --depth 1 {git_repo_url}\n",
+        "  !pip install -q youtube-dl\n",
+        "  ffmpeg_path = !which ffmpeg\n",
+        "  ffmpeg_path = dirname(ffmpeg_path[0])\n",
+        "  \n",
+        "import sys\n",
+        "sys.path.append(project_name)\n",
+        "from IPython.display import YouTubeVideo\n",
+        "\n",
+        "# Download pre-trained Model\n",
+        "def download_from_google_drive(file_id, file_name):\n",
+        "  # download a file from the Google Drive link\n",
+        "  !rm -f ./cookie\n",
+        "  !curl -c ./cookie -s -L \"https://drive.google.com/uc?export=download&id={file_id}\" > /dev/null\n",
+        "  confirm_text = !awk '/download/ {print $NF}' ./cookie\n",
+        "  confirm_text = confirm_text[0]\n",
+        "  !curl -Lb ./cookie \"https://drive.google.com/uc?export=download&confirm={confirm_text}&id={file_id}\" -o {file_name}\n",
+        "  \n",
+        "pretrained_model = 'SuperSloMo.ckpt'\n",
+        "if not exists(pretrained_model):\n",
+        "  download_from_google_drive('1IvobLDbRiBgZr3ryCRrWL8xDbMZ-KnpF', pretrained_model)"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "95JShwLGB43D",
+        "colab_type": "text"
+      },
+      "source": [
+        "## Super SloMo on a Youtube Video"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "tPAof_X3A6ZE",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Example URL: https://www.youtube.com/watch?v=P3lXKxOkxbg\n",
+        "YOUTUBE_ID = 'P3lXKxOkxbg'\n",
+        "YouTubeVideo(YOUTUBE_ID)"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "r24ETvupMcyz",
+        "colab_type": "text"
+      },
+      "source": [
+        "Info:\n",
+        "0 fps means that the video path is wrong or you need to wait a bit for Google Drive to sync and try again."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "pSDJTt6hMPHS",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "%cd /content/\n",
+        "!rm -df youtube.mp4\n",
+        "# download the youtube with the given ID\n",
+        "!youtube-dl -f 'bestvideo[ext=mp4]' --output \"youtube.%(ext)s\" https://www.youtube.com/watch?v=$YOUTUBE_ID\n",
+        "\n",
+        "# Detecting FPS of input file.\n",
+        "import os\n",
+        "import cv2\n",
+        "cap = cv2.VideoCapture('/content/youtube.mp4')\n",
+        "fps = cap.get(cv2.CAP_PROP_FPS)\n",
+        "print(\"Detected FPS: \")\n",
+        "print(fps)"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "PXZD2AdmMjAU",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Configure\n",
+        "SLOW_MOTION_FACTOR = 3\n",
+        "# You can change the final FPS manually\n",
+        "TARGET_FPS = fps*FPS_FACTOR\n",
+        "#TARGET_FPS = 90\n",
+        "print(\"Target FPS\")\n",
+        "print(TARGET_FPS)"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "zL6pcNcvGMHN",
+        "colab_type": "text"
+      },
+      "source": [
+        "Creating video with sound"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "kZEeOTvDGUE0",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "!python /content/Colab-Super-SloMo/video_to_slomo.py --ffmpeg {ffmpeg_path} --checkpoint /content/SuperSloMo.ckpt --video /content/youtube.mp4 --sf {SLOW_MOTION_FACTOR} --fps {TARGET_FPS} --output /content/output.mp4\n",
+        "!youtube-dl -x --audio-format aac https://www.youtube.com/watch?v=$YOUTUBE_ID --output /content/output-audio.aac\n",
+        "\n",
+        "# Deleting old video, if it exists\n",
+        "if os.path.exists(\"/content/output.mp4\"):\n",
+        "    os.remove(\"/content/output.mp4\")\n",
+        "\n",
+        "# You can change these ffmpeg parameter\n",
+        "%shell ffmpeg -y -r {TARGET_FPS} -f image2 -pattern_type glob -i '/content/Colab-Super-SloMo/tmp/*.png' -i /content/output-audio.aac -shortest -crf 18 /content/output.mp4"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "hyfT06K0GJgR",
+        "colab_type": "text"
+      },
+      "source": [
+        "Creating video without sound"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "fZwM0GtmA7mX",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Deleting old video, if it exists\n",
+        "if os.path.exists(\"/content/output.mp4\"):\n",
+        "    os.remove(\"/content/output.mp4\")\n",
+        "\n",
+        "!python /content/Colab-Super-SloMo/video_to_slomo.py --ffmpeg {ffmpeg_path} --checkpoint /content/SuperSloMo.ckpt --video /content/youtube.mp4 --sf {SLOW_MOTION_FACTOR} --fps {TARGET_FPS} --output /content/output.mkv\n",
+        "\n",
+        "# You can change these ffmpeg parameter\n",
+        "%shell ffmpeg -y -r {TARGET_FPS} -f image2 -pattern_type glob -i '/content/Colab-Super-SloMo/tmp/*.png' -crf 18 /content/output.mp4"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "I8tkTk-sG0fC",
+        "colab_type": "text"
+      },
+      "source": [
+        "Now you can playback the video with the last cell or copy the video back to Google Drive"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "Ac_4XjW7CkVE",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# [Optional] Copy video to Google Drive\n",
+        "\n",
+        "# Connect Google Drive\n",
+        "from google.colab import drive\n",
+        "drive.mount('/content/drive')\n",
+        "print('Google Drive connected.')\n",
+        "\n",
+        "# Copy video back to Google Drive\n",
+        "!cp /content/output.mp4 \"/content/drive/My Drive/output.mp4\""
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "GbRzS-MvWXlB",
+        "colab_type": "text"
+      },
+      "source": [
+        "## Super SloMo on a Google Drive Video\n",
+        "\n",
+        "The default input path is:\n",
+        "```\"Google Drive/input.mp4\"```. You can change the path if you want. Just change the file extention if you got a different format."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "waEQ0Yqc3apV",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Connect Google Drive\n",
+        "from google.colab import drive\n",
+        "drive.mount('/content/drive')\n",
+        "print('Google Drive connected.')"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "NPRekfGYW6TG",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Configuration. \"My Drive\" represents your Google Drive.\n",
+        "\n",
+        "# Input file:\n",
+        "INPUT_FILEPATH = \"/content/drive/My Drive/input.mp4\"\n",
+        "\n",
+        "# Output file path. MP4 is recommended. Another extention will need further code-changes.\n",
+        "OUTPUT_FILE_PATH = \"/content/drive/My Drive/output.mp4\""
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "Pv2ZbPt9CQBs",
+        "colab_type": "text"
+      },
+      "source": [
+        "Info:\n",
+        "0 fps means that the video path is wrong or you need to wait a bit for Google Drive to sync and try again."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "9hhURt61dEA_",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Detecting FPS of input file.\n",
+        "import os\n",
+        "import cv2\n",
+        "cap = cv2.VideoCapture(f'{INPUT_FILEPATH}')\n",
+        "fps = cap.get(cv2.CAP_PROP_FPS)\n",
+        "print(\"Detected FPS: \")\n",
+        "print(fps)"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "AlKXY3SUMo6T",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Configure\n",
+        "SLOW_MOTION_FACTOR = 3\n",
+        "FPS_FACTOR = 3\n",
+        "\n",
+        "# You can change the final FPS manually\n",
+        "TARGET_FPS = fps*FPS_FACTOR\n",
+        "#TARGET_FPS = 90\n",
+        "print(\"Target FPS\")\n",
+        "print(TARGET_FPS)"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "s-u5UmZkqowC",
+        "colab_type": "text"
+      },
+      "source": [
+        "[Experimental] Create Video with sound"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "OeVAsTjOqstQ",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Copy video from Google Drive\n",
+        "file_extention = os.path.splitext(INPUT_FILEPATH)[1]\n",
+        "!cp '{INPUT_FILEPATH}' /content/input{file_extention}\n",
+        "\n",
+        "!python /content/Colab-Super-SloMo/video_to_slomo.py --ffmpeg {ffmpeg_path} --checkpoint /content/SuperSloMo.ckpt --video /content/input{file_extention} --sf {SLOW_MOTION_FACTOR} --fps {TARGET_FPS} --output /content/output.mp4\n",
+        "%shell ffmpeg -i /content/input{file_extention} -acodec copy /content/output-audio.aac\n",
+        "\n",
+        "# Deleting old video, if it exists\n",
+        "if os.path.exists(\"/content/output.mp4\"):\n",
+        "    os.remove(\"/content/output.mp4\")\n",
+        "\n",
+        "# You can change these ffmpeg parameter\n",
+        "%shell ffmpeg -y -r {TARGET_FPS} -f image2 -pattern_type glob -i '/content/Colab-Super-SloMo/tmp/*.png' -i /content/output-audio.aac -shortest -crf 18 /content/output.mp4\n",
+        "\n",
+        "# Copy video back to Google Drive\n",
+        "!cp /content/output.mp4 '{OUTPUT_FILE_PATH}'"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "6YVD-qyvqfsr",
+        "colab_type": "text"
+      },
+      "source": [
+        "Create video without sound"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "L18CmdDIW1oC",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "# Copy video from Google Drive\n",
+        "file_extention = os.path.splitext(INPUT_FILEPATH)[1]\n",
+        "!cp '{INPUT_FILEPATH}' /content/input{file_extention}\n",
+        "!cd '{project_name}' && python video_to_slomo.py --ffmpeg {ffmpeg_path} --checkpoint ../{pretrained_model} --video /content/input{file_extention} --sf {SLOW_MOTION_FACTOR} --fps {TARGET_FPS} --output ../output.mp4\n",
+        "\n",
+        "# Deleting old video, if it exists\n",
+        "if os.path.exists(\"/content/output.mp4\"):\n",
+        "    os.remove(\"/content/output.mp4\")\n",
+        "\n",
+        "# You can change these ffmpeg parameter\n",
+        "%shell ffmpeg -y -r {TARGET_FPS} -f image2 -pattern_type glob -i '/content/Colab-Super-SloMo/tmp/*.png' -crf 18 /content/output.mp4\n",
+        "\n",
+        "# Copy video back to Google Drive\n",
+        "!cp /content/output.mp4 '{OUTPUT_FILE_PATH}'"
+      ],
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "xAfq3cMEbr8Q",
+        "colab_type": "text"
+      },
+      "source": [
+        "# Preview the result within Colab"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {
+        "id": "3tSH5Ndyq6F4",
+        "colab_type": "text"
+      },
+      "source": [
+        "Don't try this with big files. It will crash Colab. Small files like 10mb are ok."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {
+        "id": "s0fRYO0UWcH9",
+        "colab_type": "code",
+        "colab": {}
+      },
+      "source": [
+        "def show_local_mp4_video(file_name, width=640, height=480):\n",
+        "  import io\n",
+        "  import base64\n",
+        "  from IPython.display import HTML\n",
+        "  video_encoded = base64.b64encode(io.open(file_name, 'rb').read())\n",
+        "  return HTML(data='''<video width=\"{0}\" height=\"{1}\" alt=\"test\" controls>\n",
+        "                        <source src=\"data:video/mp4;base64,{2}\" type=\"video/mp4\" />\n",
+        "                      </video>'''.format(width, height, video_encoded.decode('ascii')))\n",
+        "\n",
+        "show_local_mp4_video('/content/output.mp4', width=960, height=720)"
+      ],
+      "execution_count": null,
+      "outputs": []
+    }
+  ]
+}
