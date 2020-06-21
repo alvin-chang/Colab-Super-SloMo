@@ -1,4 +1,4 @@
-# Super-SloMo [![MIT Licence](https://badges.frapsoft.com/os/mit/mit.svg?v=103)](https://opensource.org/licenses/mit-license.php)
+# Colab-Super-SloMo [![MIT Licence](https://badges.frapsoft.com/os/mit/mit.svg?v=103)](https://opensource.org/licenses/mit-license.php)
 ## Simply download `Colab-Super-SloMo.ipynb` and open it inside your Google Drive or click [here](https://colab.research.google.com/drive/12aoEcer6NEAxD8yvALcKcshXEPrNH_hd?usp=sharing) and copy the file with "File > Save a copy to Drive..." into your Google Drive. 
 ### 
 
