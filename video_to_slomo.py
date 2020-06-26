@@ -22,16 +22,15 @@ parser.add_argument("--fps", type=float, default=30, help='specify fps of output
 parser.add_argument("--sf", type=int, required=True, help='specify the slomo factor N. This will increase the frames by Nx. Example sf=2 ==> 2x frames')
 parser.add_argument("--batch_size", type=int, default=1, help='Specify batch size for faster conversion. This will depend on your cpu/gpu memory. Default: 1')
 parser.add_argument("--output", type=str, default="output.mkv", help='Specify output file name. Default: output.mp4')
+parser.add_argument("--remove_duplicate", type=bool, default=False, help='Removes duplicate frames, if set to True.')
 args = parser.parse_args()
 
 def check():
     """
     Checks the validity of commandline arguments.
-
     Parameters
     ----------
         None
-
     Returns
     -------
         error : string
@@ -53,14 +52,12 @@ def check():
 def extract_frames(video, outDir):
     """
     Converts the `video` to images.
-
     Parameters
     ----------
         video : string
             full path to the video file.
         outDir : string
             path to directory to output the extracted images.
-
     Returns
     -------
         error : string
@@ -71,6 +68,14 @@ def extract_frames(video, outDir):
     error = ""
     print('{} -i {} -vsync 0 {}/%06d.png'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), video, outDir))
     retn = os.system('{} -i "{}" -vsync 0 {}/%06d.png'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), video, outDir))
+    if retn:
+        error = "Error converting file:{}. Exiting.".format(video)
+    return error
+
+def extract_frames_no_duplicate(video, outDir):
+    error = ""
+    print('{} -i {} -vf mpdecimate -vsync 0 {}/%06d.png'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), video, outDir))
+    retn = os.system('{} -i "{}" -vf mpdecimate -vsync 0 {}/%06d.png'.format(os.path.join(args.ffmpeg_dir, "ffmpeg"), video, outDir))
     if retn:
         error = "Error converting file:{}. Exiting.".format(video)
     return error
@@ -113,7 +118,13 @@ def main():
     outputPath     = '/content/Colab-Super-SloMo/tmp'
     os.mkdir(extractionPath)
     os.mkdir(outputPath)
-    error = extract_frames(args.video, extractionPath)
+    
+    if args.remove_duplicate == True:
+      error = extract_frames_no_duplicate(args.video, extractionPath)
+    else:
+      error = extract_frames(args.video, extractionPath)
+    
+
     if error:
         print(error)
         exit(1)
