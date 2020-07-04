@@ -1,5 +1,5 @@
 # Colab-Super-SloMo [![MIT Licence](https://badges.frapsoft.com/os/mit/mit.svg?v=103)](https://opensource.org/licenses/mit-license.php)
-## Simply download `Colab-Super-SloMo.ipynb` and open it inside your Google Drive or click [here](https://colab.research.google.com/drive/18fq_DIc7UKkdJ1YSO8VRdY6X-m1yfX2G?usp=sharing) and copy the file with "File > Save a copy to Drive..." into your Google Drive. 
+## Simply download `Colab-Super-SloMo.ipynb` and open it inside your Google Drive or click [here](https://colab.research.google.com/github/styler00dollar/Colab-Super-SloMo/blob/master/Colab-Super-SloMo.ipynb) and copy the file with "File > Save a copy to Drive..." into your Google Drive. 
 ### 
 
 PyTorch implementation of "Super SloMo: High Quality Estimation of Multiple Intermediate Frames for Video Interpolation" by Jiang H., Sun D., Jampani V., Yang M., Learned-Miller E. and Kautz J. [[Project]](https://people.cs.umass.edu/~hzjiang/projects/superslomo/) [[Paper]](https://arxiv.org/abs/1712.00080)
@@ -8,7 +8,7 @@ __Check out [our paper](https://github.com/avinashpaliwal/Deep-SloMo) "Deep Slow
 
 ## Important information
 
-- If you can't open `Colab-Super-SloMo.ipynb` inside your Google Drive, try this [colab link](https://colab.research.google.com/drive/18fq_DIc7UKkdJ1YSO8VRdY6X-m1yfX2G?usp=sharing) and save it to your Google Drive. The "open in Colab"-button can be missing in Google Drive, if that person never used Colab.
+- If you can't open `Colab-Super-SloMo.ipynb` inside your Google Drive, try this [colab link](https://colab.research.google.com/github/styler00dollar/Colab-Super-SloMo/blob/master/Colab-Super-SloMo.ipynb) and save it to your Google Drive. The "open in Colab"-button can be missing in Google Drive, if that person never used Colab.
 - Google Colab does assign a random GPU. It depends on luck.
 - The Google Colab VM does have a maximum session length of 12 hours. Additionally there is a 30 minute timeout if you leave colab. The VM will be deleted after these timeouts.
 
